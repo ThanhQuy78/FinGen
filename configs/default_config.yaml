@@ -1,0 +1,92 @@
+# Configuration for Cross-Sensor Fingerprint Generation & Transfer Pipeline
+
+model:
+  hidden_size: 768
+  num_heads: 12
+  depth: 16
+  patch_size: 2
+  in_channels: 4          # VAE latent channels
+  out_channels: 4
+  latent_size: 32         # 32x32 latent for 256x256 image
+  num_sensor_classes: 8   # NIST SD302a sensors A-H
+  rope_dim: 64            # 2D-RoPE dimension per head
+  rope_offset_delta: 100  # Offset delta for unaligned Stream Y position IDs
+
+# Lightweight config for CPU/small GPU (uncomment to override)
+# model:
+#   hidden_size: 256
+#   num_heads: 4
+#   depth: 4
+#   patch_size: 2
+#   in_channels: 4
+#   out_channels: 4
+#   latent_size: 32
+#   num_sensor_classes: 8
+#   rope_dim: 64
+#   rope_offset_delta: 100
+
+vae:
+  weights: "./weights/vae_fingerprint.pt"
+  latent_channels: 4
+  base_channels: 64
+  freeze: true            # Freeze VAE during MM-DiT training
+
+baseline:
+  control_blocks: 4       # Number of replicated blocks for ControlNet baseline
+
+preprocessing:
+  coarsenet_weights: "./weights/coarsenet_pytorch.pt"   # produced by convert_minutiaenet_weights.py
+  coarsenet_keras_h5: "./CoarseNet.h5"                  # original MinutiaeNet release
+  freeze_extractor: true
+  max_canvas: 768         # cap on the CoarseNet input side (memory + ppi normalisation)
+
+dataset:
+  image_size: 256
+  contact_only: true
+  # Directory holding the A..H device folders of NIST SD302a
+  # ({DEVICE}/{IMPRESSION}/png/{SUBJECT}_{DEVICE}_{IMPRESSION}_{FRGP}.png)
+  sd302a_root: "./archive/images/challengers"
+  sd302a_impressions: ["roll"]   # null / [] = every impression type present
+  directed_pairs: true           # emit both A->B and B->A for each sensor pair
+  max_pairs_per_finger: 0        # 0 = all C(n,2) (x2 if directed); set e.g. 6 to subsample
+  val_fraction: 0.1              # split is by SUBJECT id, never by sample
+  split_seed: 42
+  require_cache: false           # true = fail instead of using random S_aligned
+  fvc_roots: []
+  multisensor_root: ""
+  sd14_root: ""
+  sd4_root: ""
+  printsgan_root: ""
+  cached_prep_dir: "./data/cached_stage1"
+  num_workers: 4
+
+training:
+  batch_size: 8
+  learning_rate: 1.0e-4
+  epochs: 50
+  objective: "rectified_flow"
+  use_direct_bridge: false    # true for paired sensor transfer
+  nfe_steps: 20
+  grad_clip_max_norm: 1.0
+  ema_decay: 0.9999
+  warmup_steps: 1000
+  save_every_epochs: 5
+  val_every_epochs: 1
+  log_every_steps: 50
+  output_dir: "./outputs/training"
+  amp: true                   # Mixed precision (auto-disabled on CPU)
+
+losses:
+  l_diff_weight: 1.0
+  l_identity_weight: 0.1
+  l_orient_weight: 0.05
+  warmup_epochs: 5
+  timestep_decay: true
+
+eval:
+  checkpoint: "./outputs/training/best.pt"
+  output_dir: "./outputs/eval"
+  matcher_backend: "bozorth3"
+  num_eval_samples: -1        # -1 = all val samples
+  save_images: true
+  nfe_steps: 20

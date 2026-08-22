@@ -1,0 +1,77 @@
+{
+  "num_samples": 2,
+  "nfe_steps": 20,
+  "checkpoint": "./outputs/training/best.pt",
+  "time_seconds": 30.6,
+  "time_per_sample_ms": 15309.2,
+  "aggregated_metrics": {
+    "orientation_rmse_deg": {
+      "mean": 44.16,
+      "std": 1.86,
+      "min": 42.3,
+      "max": 46.02
+    },
+    "minutiae_precision": {
+      "mean": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "minutiae_recall": {
+      "mean": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "minutiae_f1": {
+      "mean": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "mse": {
+      "mean": 0.082,
+      "std": 0.0156,
+      "min": 0.0664,
+      "max": 0.0975
+    },
+    "psnr_db": {
+      "mean": 10.945,
+      "std": 0.835,
+      "min": 10.11,
+      "max": 11.78
+    },
+    "orientation_cosine_sim": {
+      "mean": 0.9401,
+      "std": 0.002,
+      "min": 0.9381,
+      "max": 0.9421
+    }
+  },
+  "per_sample_metrics": [
+    {
+      "sample_id": "sd302a_00002310_01_A2B",
+      "orientation_rmse_deg": 46.02,
+      "minutiae_precision": 0.0,
+      "minutiae_recall": 0.0,
+      "minutiae_f1": 0.0,
+      "mse": 0.097516,
+      "psnr_db": 10.11,
+      "orientation_cosine_sim": 0.9421,
+      "gen_minutiae_count": 0,
+      "tgt_minutiae_count": 0
+    },
+    {
+      "sample_id": "sd302a_00002310_01_B2A",
+      "orientation_rmse_deg": 42.3,
+      "minutiae_precision": 0.0,
+      "minutiae_recall": 0.0,
+      "minutiae_f1": 0.0,
+      "mse": 0.066394,
+      "psnr_db": 11.78,
+      "orientation_cosine_sim": 0.9381,
+      "gen_minutiae_count": 0,
+      "tgt_minutiae_count": 0
+    }
+  ]
+}

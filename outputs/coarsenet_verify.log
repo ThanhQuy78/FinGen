@@ -1,0 +1,16 @@
+Device: cpu | max_canvas: 512 px
+[FingerNetExtractor] Loaded pretrained weights from ./weights/coarsenet_pytorch.pt
+sensor tech                  canvas     fg%  minutiae     sec
+-------------------------------------------------------------
+A      optical                  512   70.6%        94    44.0
+B      optical                  512   55.8%       120    43.9
+C      capacitive               512   42.0%        27    43.9
+D      thermal_sweep            512   88.6%       114    41.4
+E      optical                  512   32.3%         5    40.8
+F      capacitive               512   32.1%        63    38.7
+G      optical_rolled           512   28.8%        18    41.8
+H      capacitive_sweep         512   43.4%        82    41.9
+-------------------------------------------------------------
+Wrote visualisations to ./outputs/coarsenet_check
+Expect: segmentation tracking the print, phase showing clean ridge stripes,
+        orientation flowing along ridges, ~40-150 minutiae on a rolled print.

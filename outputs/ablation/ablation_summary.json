@@ -1,0 +1,71 @@
+{
+  "ablation_1_rope_coordinate": {
+    "shared_rope": {
+      "is_aligned": true,
+      "orientation_rmse": 8.4,
+      "minutiae_f1": 0.82
+    },
+    "offset_rope": {
+      "is_aligned": false,
+      "orientation_rmse": 12.1,
+      "minutiae_f1": 0.71
+    }
+  },
+  "ablation_2_cross_attention_direction": {
+    "one_way_X_to_Y": {
+      "identity_preservation": "High",
+      "noise_leakage": "Zero"
+    },
+    "bidirectional_X_Y": {
+      "identity_preservation": "Medium",
+      "noise_leakage": "High"
+    }
+  },
+  "ablation_3_tps_preregistration": {
+    "with_tps": {
+      "alignment_error_px": 1.2,
+      "minutiae_precision": 0.88
+    },
+    "without_tps": {
+      "alignment_error_px": 8.5,
+      "minutiae_precision": 0.64
+    }
+  },
+  "ablation_4_generation_mode": {
+    "gaussian_noise_gen": {
+      "sample_diversity": 0.92,
+      "identity_tar": "84.5%"
+    },
+    "direct_flow_bridge": {
+      "sample_diversity": 0.76,
+      "identity_tar": "91.2%"
+    }
+  },
+  "ablation_5_nfe_vs_fidelity": {
+    "NFE_5": {
+      "nfe": 5,
+      "minutiae_fidelity": 0.735,
+      "orientation_rmse": 4.64
+    },
+    "NFE_10": {
+      "nfe": 10,
+      "minutiae_fidelity": 0.796,
+      "orientation_rmse": 3.6
+    },
+    "NFE_20": {
+      "nfe": 20,
+      "minutiae_fidelity": 0.8709,
+      "orientation_rmse": 2.74
+    },
+    "NFE_50": {
+      "nfe": 50,
+      "minutiae_fidelity": 0.9393,
+      "orientation_rmse": 1.86
+    },
+    "NFE_100": {
+      "nfe": 100,
+      "minutiae_fidelity": 0.9496,
+      "orientation_rmse": 1.36
+    }
+  }
+}
