@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
+from src.losses.dmd.model_zoo import DMD
+
 
 class AFRNetEmbeddingExtractor(nn.Module):
     """
@@ -52,44 +54,119 @@ class AFRNetEmbeddingExtractor(nn.Module):
         return embed
 
 
+class DMDEmbeddingExtractor(nn.Module):
+    """
+    Adapts DMD (Dense Minutia Descriptor — Pan et al., IJCB 2024, arXiv:2405.01199,
+    Apache-2.0; vendored under `src/losses/dmd/`, see `dmd/NOTICE.md`) to the single
+    global, L2-normalized embedding interface `IdentityCosineLoss` needs.
+
+    DMD's own output is a *dense* per-patch descriptor (a texture branch `feat_t` and
+    a minutiae branch `feat_f`, each (B, ndim_feat, h, w)) plus a foreground mask
+    `mask_f` (B, 1, h, w) — built for correlation-based dense matching, not a single
+    vector. We reduce it to one vector via mask-weighted global-average-pooling of
+    both branches, concatenated and L2-normalized. This throws away DMD's spatial
+    correspondence — it is a simplification adequate for a scalar `L_Identity`
+    training signal, not a substitute for DMD's own matcher.
+
+    DMD was trained on images normalized to [-1, 1] (`(img - 127.5) / 127.5`), so this
+    wrapper rescales the [0, 1] tensors the rest of the pipeline uses before calling
+    the backbone.
+    """
+
+    def __init__(
+        self,
+        num_in: int = 1,
+        ndim_feat: int = 6,
+        pos_embed: bool = True,
+        input_norm: bool = False,
+        tar_shape: tuple = (128, 128),
+    ):
+        super().__init__()
+        self.model = DMD(
+            num_in=num_in, ndim_feat=ndim_feat, pos_embed=pos_embed,
+            input_norm=input_norm, tar_shape=tar_shape,
+        )
+
+    def forward(self, img: torch.Tensor) -> torch.Tensor:
+        """
+        Input: img tensor of shape (B, 1, H, W) normalized to [0, 1]
+        Output: L2-normalized identity embedding of shape (B, 2 * ndim_feat)
+        """
+        x = img * 2.0 - 1.0  # [0, 1] -> [-1, 1], DMD's expected input range
+        out = self.model(x)
+        mask = out["mask_f"]
+        denom = mask.sum(dim=(2, 3)).clamp_min(1e-6)
+        pooled_f = (out["feat_f"] * mask).sum(dim=(2, 3)) / denom
+        pooled_t = (out["feat_t"] * mask).sum(dim=(2, 3)) / denom
+        embed = torch.cat([pooled_f, pooled_t], dim=1)
+        return F.normalize(embed, p=2, dim=1, eps=1e-8)
+
+
 class IdentityCosineLoss(nn.Module):
     """
     Differentiable Identity Preservation Loss L_Identity.
     Computes cosine distance between generated image x_0 and source image I_A embeddings.
-    
-    The embedder should be pretrained on PrintsGAN and fine-tuned on real data (SD302a/N2N).
+
+    `embedder_type` selects the backbone when no `embedder` instance is passed in:
+      - "dmd"    (default): DMDEmbeddingExtractor, pretrained on real fingerprints
+                 (NIST SD14) — recommended, see `checkpoint_path`.
+      - "afrnet": AFRNetEmbeddingExtractor — the original placeholder CNN. Its
+                 pretraining recipe (PrintsGAN -> SD302a/N2N finetune) was never
+                 executed in this repo, so without a `checkpoint_path` it is random
+                 init and contributes no real identity signal.
+
     Weights are frozen during diffusion training — gradients flow through the embedder
     to the input x0_est, but do not update embedder parameters.
     """
 
-    def __init__(self, embedder: Optional[nn.Module] = None, checkpoint_path: Optional[str] = None):
+    def __init__(
+        self,
+        embedder: Optional[nn.Module] = None,
+        checkpoint_path: Optional[str] = None,
+        embedder_type: str = "dmd",
+    ):
         super().__init__()
-        self.embedder = embedder or AFRNetEmbeddingExtractor()
-        
+        if embedder is not None:
+            self.embedder = embedder
+        elif embedder_type == "dmd":
+            self.embedder = DMDEmbeddingExtractor()
+        elif embedder_type == "afrnet":
+            self.embedder = AFRNetEmbeddingExtractor()
+        else:
+            raise ValueError(f"Unknown embedder_type: {embedder_type!r} (expected 'dmd' or 'afrnet')")
+
         # Load pretrained weights if provided
         if checkpoint_path is not None:
             self.load_pretrained(checkpoint_path)
-        
+
         # Freeze embedder weights during diffusion training
         for param in self.embedder.parameters():
             param.requires_grad = False
 
     def load_pretrained(self, checkpoint_path: str) -> None:
         """
-        Loads pretrained AFRNet/DeepPrint weights from checkpoint file.
-        Expected recipe: pretrain on PrintsGAN (525k synthetic) → fine-tune on SD302a/N2N (~25k real).
+        Loads pretrained embedder weights from checkpoint file. Works for both
+        DMDEmbeddingExtractor (loads into `self.embedder.model`) and
+        AFRNetEmbeddingExtractor (loads into `self.embedder` directly) —
+        DMD checkpoints carry a nested 'model' state_dict, so we detect which
+        submodule actually matches before loading.
         """
         import os
         if not os.path.exists(checkpoint_path):
             print(f"[IdentityCosineLoss] Warning: checkpoint not found at {checkpoint_path}, using random init")
             return
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
-        # Handle wrapped state dicts (e.g., from DDP or lightning)
-        if "state_dict" in state_dict:
+        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        state_dict = ckpt
+        if isinstance(state_dict, dict) and "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
-        if "model" in state_dict:
+        if isinstance(state_dict, dict) and "model" in state_dict:
             state_dict = state_dict["model"]
-        self.embedder.load_state_dict(state_dict, strict=False)
+
+        target = self.embedder.model if isinstance(self.embedder, DMDEmbeddingExtractor) else self.embedder
+        missing, unexpected = target.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            print(f"[IdentityCosineLoss] Warning: {len(missing)} missing / {len(unexpected)} "
+                  f"unexpected keys loading {checkpoint_path}")
         print(f"[IdentityCosineLoss] Loaded pretrained embedder from {checkpoint_path}")
 
     def forward(self, x0_est: torch.Tensor, img_A: torch.Tensor) -> torch.Tensor:

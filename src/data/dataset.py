@@ -120,8 +120,25 @@ class CrossSensorFingerprintDataset(Dataset):
         self.val_fraction = float(ds_cfg.get("val_fraction", 0.1))
         self.split_seed = int(ds_cfg.get("split_seed", 42))
         self.contact_only = bool(ds_cfg.get("contact_only", True))
+        self.exclude_sensors = {s.upper() for s in ds_cfg.get("exclude_sensors", [])}
         self.directed_pairs = bool(ds_cfg.get("directed_pairs", True))
         self.max_pairs_per_finger = int(ds_cfg.get("max_pairs_per_finger", 0))  # 0 = unlimited
+        # Tier-1 rebalancing (see _index_sd302a): pairs-per-finger scales
+        # ~quadratically with how many real sensors a finger has, so fingers
+        # with sparse real coverage are proportionally under-represented in
+        # every epoch relative to fully-covered ones -- exactly backwards
+        # from what's useful, since sparse coverage is the regime inference
+        # needs to extrapolate from. min_pairs_per_finger deterministically
+        # duplicates a sparse finger's pairs up toward this floor; 0 disables.
+        self.min_pairs_per_finger = int(ds_cfg.get("min_pairs_per_finger", 0))
+        # Similarly, some target sensors (e.g. G) have far fewer real
+        # captures dataset-wide, so they're rarely drawn as sensor_B. Repeat
+        # pairs whose target sensor is a key here by (roughly) the given
+        # factor; e.g. {"G": 3.0} triples G-target pair frequency. Empty
+        # dict disables.
+        self.sensor_b_oversample = {
+            s.upper(): float(w) for s, w in (ds_cfg.get("sensor_b_oversample", {}) or {}).items()
+        }
         self.allow_synthetic = allow_synthetic
         self.require_cache = bool(ds_cfg.get("require_cache", False))
 
@@ -136,6 +153,9 @@ class CrossSensorFingerprintDataset(Dataset):
         samples += self._index_sd302a(ds_cfg)
         samples += self._index_unpaired(ds_cfg)
 
+        if self.require_cache and samples:
+            samples = self._drop_uncached(samples)
+
         if not samples:
             if not self.allow_synthetic:
                 raise RuntimeError(
@@ -147,6 +167,23 @@ class CrossSensorFingerprintDataset(Dataset):
                 )
             samples = self._synthetic_samples()
         return samples
+
+    def _drop_uncached(self, samples: List[Dict]) -> List[Dict]:
+        """
+        With `require_cache=True`, __getitem__ would otherwise raise on any sample
+        whose source image failed Stage-1 preprocessing (e.g. a corrupt/near-empty
+        source PNG in the raw dataset — happens rarely but does happen: SD302a
+        ships at least one 1x1 px placeholder file). Filtering here turns that into
+        a one-time, visible skip at dataset-construction time instead of a training
+        crash on whichever step happens to draw that sample.
+        """
+        keep = [s for s in samples
+                if os.path.exists(os.path.join(self.cached_dir, f"{s['cache_key_A']}_stage1.pt"))]
+        dropped = len(samples) - len(keep)
+        if dropped:
+            print(f"[CrossSensorFingerprintDataset] require_cache=True: dropped {dropped} "
+                  f"sample(s) with no Stage-1 cache (likely failed source image(s)).")
+        return keep
 
     def _index_sd302a(self, ds_cfg: Dict) -> List[Dict]:
         root = ds_cfg.get("sd302a_root", "")
@@ -164,6 +201,8 @@ class CrossSensorFingerprintDataset(Dataset):
             by_sensor = finger_index[finger_key]
             if self.contact_only:
                 by_sensor = {s: p for s, p in by_sensor.items() if s in contact}
+            if self.exclude_sensors:
+                by_sensor = {s: p for s, p in by_sensor.items() if s not in self.exclude_sensors}
             sensors = sorted(by_sensor)
             if len(sensors) < 2:
                 continue
@@ -187,6 +226,36 @@ class CrossSensorFingerprintDataset(Dataset):
                 )
                 keep = rng.permutation(len(pairs))[: self.max_pairs_per_finger]
                 pairs = [pairs[k] for k in sorted(keep)]
+
+            # Tier-1: floor sparse fingers' pair count by duplication (see
+            # __init__). Deterministic per finger so epochs stay reproducible.
+            if self.min_pairs_per_finger > 0 and pairs and len(pairs) < self.min_pairs_per_finger:
+                rng = np.random.RandomState(
+                    int(hashlib.md5((finger_key + "|oversample").encode()).hexdigest()[:8], 16)
+                )
+                n_needed = self.min_pairs_per_finger - len(pairs)
+                pairs = pairs + [pairs[i] for i in rng.randint(0, len(pairs), size=n_needed)]
+
+            # Tier-1: boost rare target sensors (see __init__). Integer part
+            # of the factor duplicates deterministically; the fractional
+            # remainder is applied as a per-pair deterministic coin flip so
+            # the long-run average frequency matches the requested factor.
+            if self.sensor_b_oversample:
+                boosted: List[Tuple[str, str]] = []
+                for s_a, s_b in pairs:
+                    boosted.append((s_a, s_b))
+                    extra = self.sensor_b_oversample.get(s_b, 1.0) - 1.0
+                    if extra <= 0:
+                        continue
+                    reps, frac = int(extra), extra - int(extra)
+                    boosted.extend([(s_a, s_b)] * reps)
+                    if frac > 0:
+                        coin = np.random.RandomState(
+                            int(hashlib.md5(f"{finger_key}|{s_a}|{s_b}|frac".encode()).hexdigest()[:8], 16)
+                        )
+                        if coin.random_sample() < frac:
+                            boosted.append((s_a, s_b))
+                pairs = boosted
 
             for s_a, s_b in pairs:
                 samples.append({

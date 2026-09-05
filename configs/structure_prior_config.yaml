@@ -1,0 +1,50 @@
+# Configuration for the unconditional structural-map prior
+# (src/models/structure_prior_unet.py) — learns p(S_aligned) over real
+# fingerprints so a brand-new, not-in-dataset structural map can be sampled
+# from noise and then rendered into a full image by the already-trained
+# UNet+ControlNet pipeline (configs/unet_controlnet_config.yaml). Neither
+# model alone generates a new identity; composed, they do.
+
+prior_model:
+  struct_channels: 6
+  base_channels: 64
+  channel_mult: [1, 2, 4]   # map_size 64x64 -> 64 -> 32 -> 16
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  num_heads: 8
+  map_size: 64              # matches unet_controlnet's latent_size, so a sampled map
+                             # plugs straight into UNetControlNetDenoiser with no resizing
+
+# Lightweight config for CPU/small GPU smoke tests (--small flag)
+# prior_model:
+#   struct_channels: 6
+#   base_channels: 24
+#   channel_mult: [1, 2]
+#   num_res_blocks: 1
+#   attn_resolutions: []
+#   num_heads: 4
+#   map_size: 64
+
+dataset:
+  cached_prep_dir: "./data/cached_stage1"
+  val_fraction: 0.1
+  split_seed: 42
+  num_workers: 4
+
+training:
+  batch_size: 32              # small 6ch/64x64 tensors, no VAE/UNet-ControlNet forward pass -> cheap, larger batch than the main model
+  learning_rate: 2.0e-4
+  epochs: 100
+  nfe_steps: 20
+  grad_clip_max_norm: 1.0
+  ema_decay: 0.9999
+  warmup_steps: 500
+  save_every_epochs: 5
+  val_every_epochs: 1
+  log_every_steps: 50
+  output_dir: "./outputs/training_structure_prior"
+  amp: true
+
+eval:
+  checkpoint: "./outputs/training_structure_prior/best.pt"
+  output_dir: "./outputs/eval_structure_prior"

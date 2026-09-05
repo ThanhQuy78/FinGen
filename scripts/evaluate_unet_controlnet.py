@@ -1,12 +1,16 @@
 """
-Production Evaluation Script for Cross-Sensor Fingerprint Transfer.
-
-Loads trained MM-DiT + VAE, generates images for the full val/test set,
-extracts features, and computes real metrics.
+Evaluation script for the UNet + ControlNet + Flow-Matching backbone
+(src/models/unet_controlnet.py) — mirrors evaluate.py exactly except for the
+model class, its config keys, and default paths. See train_unet_controlnet.py
+for why this needed its own script rather than reusing evaluate.py: the
+`--small` architecture and `config["model"]` keys there are MM-DiT-specific
+(hidden_size/depth/num_heads), not backbone-agnostic. Everything downstream
+of the model call (VAE decode, CoarseNet feature extraction, metrics) is
+unchanged.
 
 Usage:
-    python scripts/evaluate.py --checkpoint outputs/training/best.pt
-    python scripts/evaluate.py --checkpoint outputs/training/best.pt --num_samples 50 --save_images
+    python scripts/evaluate_unet_controlnet.py --checkpoint outputs/training_unet_controlnet/best.pt
+    python scripts/evaluate_unet_controlnet.py --checkpoint outputs/training_unet_controlnet/best.pt --num_samples 50 --save_images
 """
 
 import sys
@@ -21,17 +25,18 @@ import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.models.mm_dit import DualStreamMMDiT
+from src.models.unet_controlnet import UNetControlNetDenoiser
 from src.models.vae import FingerprintVAE
 from src.models.flow_matching import RectifiedFlowTrajectoryManager
 from src.preprocessing.fingernet_extractor import FingerNetExtractor, build_extractor
 from src.evaluation.eval_metrics import FingerprintEvaluator
 from src.data.dataset import CrossSensorFingerprintDataset
+from src.losses.identity_loss import IdentityCosineLoss
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate fingerprint generation model")
-    parser.add_argument("--config", type=str, default="./configs/default_config.yaml")
+    parser = argparse.ArgumentParser(description="Evaluate UNet+ControlNet fingerprint generation model")
+    parser.add_argument("--config", type=str, default="./configs/unet_controlnet_config.yaml")
     parser.add_argument("--checkpoint", type=str, default="")
     parser.add_argument("--output_dir", type=str, default="")
     parser.add_argument("--num_samples", type=int, default=-1,
@@ -67,7 +72,7 @@ def main():
         os.makedirs(img_dir, exist_ok=True)
 
     print("=" * 60)
-    print("EVALUATION: Cross-Sensor Fingerprint Generation")
+    print("EVALUATION: UNet + ControlNet Cross-Sensor Fingerprint Generation")
     print("=" * 60)
     print(f"Device: {device}")
     print(f"Checkpoint: {checkpoint_path}")
@@ -85,35 +90,47 @@ def main():
         print(f"WARNING: VAE weights not found at {vae_path}, using random VAE")
     vae.eval()
 
-    # ─── Load MM-DiT ───
+    # ─── Load UNet+ControlNet ───
+    um = config["unet_model"]
     if args.small:
-        hidden_size, depth, num_heads = 256, 4, 4
+        base_channels, channel_mult, num_res_blocks, attn_resolutions, num_heads, control_levels = \
+            32, (1, 2), 1, (), 4, 1
     else:
-        hidden_size = config["model"]["hidden_size"]
-        depth = config["model"]["depth"]
-        num_heads = config["model"]["num_heads"]
+        base_channels = um["base_channels"]
+        channel_mult = tuple(um["channel_mult"])
+        num_res_blocks = um["num_res_blocks"]
+        attn_resolutions = tuple(um["attn_resolutions"])
+        num_heads = um["num_heads"]
+        control_levels = um["control_levels"]
 
     model_kwargs = dict(
-        in_channels=config["model"]["in_channels"],
-        hidden_size=hidden_size,
-        depth=depth,
+        in_channels=um["in_channels"],
+        out_channels=um["out_channels"],
+        struct_channels=um["struct_channels"],
+        base_channels=base_channels,
+        channel_mult=channel_mult,
+        num_res_blocks=num_res_blocks,
+        attn_resolutions=attn_resolutions,
         num_heads=num_heads,
-        patch_size=config["model"]["patch_size"],
-        num_sensors=config["model"]["num_sensor_classes"],
-        rope_offset_delta=config["model"]["rope_offset_delta"]
+        num_sensors=um["num_sensor_classes"],
+        latent_size=um["latent_size"],
+        control_levels=control_levels,
     )
 
     ckpt = None
     if checkpoint_path and os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
-        # Checkpoints written by train_mmdit.py carry their own architecture, so a
-        # --small run evaluates correctly without repeating the flag here.
+        # Checkpoints written by train_unet_controlnet.py carry their own
+        # architecture (channel_mult can differ under --small), so a --small
+        # run evaluates correctly without repeating the flag here.
         if ckpt.get("model_kwargs"):
             model_kwargs = ckpt["model_kwargs"]
-            print(f"Architecture from checkpoint: hidden={model_kwargs['hidden_size']} "
-                  f"depth={model_kwargs['depth']} heads={model_kwargs['num_heads']}")
+            print(f"Architecture from checkpoint: base_channels={model_kwargs['base_channels']} "
+                  f"channel_mult={model_kwargs['channel_mult']} "
+                  f"num_res_blocks={model_kwargs['num_res_blocks']} "
+                  f"control_levels={model_kwargs['control_levels']}")
 
-    model = DualStreamMMDiT(**model_kwargs).to(device)
+    model = UNetControlNetDenoiser(**model_kwargs).to(device)
 
     if ckpt is not None:
         # Try EMA weights first (better quality)
@@ -135,12 +152,23 @@ def main():
 
     model.eval()
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"MM-DiT params: {total_params:,}")
+    print(f"UNet+ControlNet params: {total_params:,}")
 
     # ─── Feature Extractor (for evaluating generated images) ───
-    # Load the pretrained CoarseNet — evaluating orientation/minutiae metrics against
-    # a randomly-initialised extractor would produce meaningless numbers.
     extractor = build_extractor(config, device=device)
+
+    # ─── Identity critic ───
+    # Same DMD embedder used as L_Identity during training (loss_builder.py),
+    # reused here read-only as an evaluation metric — the training loss never
+    # actually got reported as a held-out number anywhere, so "does the
+    # generated image keep the source's identity" had no metric of its own.
+    # Frozen (IdentityCosineLoss already freezes the embedder's params), so
+    # this is purely a critic here, not a training signal.
+    identity_loss_fn = IdentityCosineLoss(
+        embedder_type=config["losses"].get("identity_embedder", "dmd"),
+        checkpoint_path=config["losses"].get("identity_checkpoint", "./weights/dmd.pt"),
+    ).to(device)
+    identity_loss_fn.eval()
 
     # ─── Evaluation Setup ───
     traj_manager = RectifiedFlowTrajectoryManager()
@@ -151,7 +179,7 @@ def main():
     num_samples = min(num_samples, len(dataset))
     print(f"Evaluating {num_samples} samples...")
 
-    latent_size = config["model"].get("latent_size", 32)
+    latent_size = um.get("latent_size", 64)
 
     # ─── Generate & Evaluate ───
     all_metrics = []
@@ -165,7 +193,6 @@ def main():
         sensor_b = sample["sensor_B"].unsqueeze(0).to(device)
         sample_id = sample.get("sample_id", f"sample_{i}")
 
-        # Ensure correct size
         if img_a.shape[-1] != 256:
             img_a = F.interpolate(img_a, size=(256, 256), mode="bilinear", align_corners=False)
             img_b = F.interpolate(img_b, size=(256, 256), mode="bilinear", align_corners=False)
@@ -173,32 +200,26 @@ def main():
         S_for_model = F.interpolate(S_aligned, size=(latent_size, latent_size),
                                     mode="bilinear", align_corners=False)
 
-        # Generate via Euler sampling
+        # Generate via Euler sampling — sample_euler's non-MM-DiT branch
+        # (model has no `.blocks`/`forward_y_stream`) calls model(x, t, c,
+        # struct_map) directly, exactly UNetControlNetDenoiser.forward's
+        # signature. `is_aligned` is accepted but unused on this path.
         with torch.no_grad():
             generated_lat = traj_manager.sample_euler(
-                model, shape=(1, config["model"]["in_channels"], latent_size, latent_size),
+                model, shape=(1, um["in_channels"], latent_size, latent_size),
                 c=sensor_b, struct_map=S_for_model,
                 is_aligned=True, steps=args.nfe_steps
             )
-            # Decode latent to image
             generated_img = vae.decode(generated_lat)  # (1, 1, 256, 256)
 
         # Compute metrics
-        # 1. Orientation RMSE
         orient_rmse = evaluator.compute_orientation_rmse(generated_img, img_b)
 
-        # 2. Extract minutiae from generated image
         with torch.no_grad():
             gen_feats = extractor(generated_img)
             tgt_feats = extractor(img_b)
 
-        # Decode minutiae the same way extract_minutiae() does elsewhere in the
-        # codebase: threshold `mnt_s` at its native 1/8-resolution grid with the
-        # w/h sub-cell offset, not a naive threshold on the bilinear-upsampled
-        # `minutiae_map`. The upsampled map dilutes sharp low-res peaks below 0.5
-        # almost everywhere (confirmed: real target images were also coming out
-        # at 0 detected minutiae with the old approach — see analysis_results.md).
-        gen_pts_full = extractor.extract_minutiae(feats=gen_feats)[0]  # (N, 4) = [x, y, angle, score]
+        gen_pts_full = extractor.extract_minutiae(feats=gen_feats)[0]
         tgt_pts_full = extractor.extract_minutiae(feats=tgt_feats)[0]
         gen_pts = gen_pts_full[:, :2]
         tgt_pts = tgt_pts_full[:, :2]
@@ -208,16 +229,25 @@ def main():
         else:
             prec, rec, f1 = 0.0, 0.0, 0.0
 
-        # 3. Reconstruction quality (MSE, SSIM-like)
         mse = F.mse_loss(generated_img, img_b).item()
         psnr = -10 * np.log10(max(mse, 1e-10))
 
-        # 4. Identity preservation via embedding cosine similarity
         gen_orient = gen_feats["orientation_map"]
         tgt_orient = tgt_feats["orientation_map"]
         orient_cosine = F.cosine_similarity(
             gen_orient.flatten(1), tgt_orient.flatten(1)
         ).item()
+
+        # 5. Identity preservation via DMD embedding cosine similarity — does the
+        # generated image still match the *source* fingerprint's identity?
+        # Also score target-vs-source: img_a/img_b are the same finger on two
+        # different sensors (directed_pairs), so this is the DMD embedder's own
+        # "genuine cross-sensor pair" reference — how far gen-vs-source falls
+        # short of that tells you how much identity the model is actually losing,
+        # not just what the raw number is in isolation.
+        with torch.no_grad():
+            identity_sim_gen_src = 1.0 - identity_loss_fn(generated_img, img_a).item()
+            identity_sim_tgt_src = 1.0 - identity_loss_fn(img_b, img_a).item()
 
         metrics = {
             "sample_id": sample_id,
@@ -228,12 +258,13 @@ def main():
             "mse": round(mse, 6),
             "psnr_db": round(psnr, 2),
             "orientation_cosine_sim": round(orient_cosine, 4),
+            "identity_cosine_sim_gen_vs_source": round(identity_sim_gen_src, 4),
+            "identity_cosine_sim_target_vs_source": round(identity_sim_tgt_src, 4),
             "gen_minutiae_count": len(gen_pts),
             "tgt_minutiae_count": len(tgt_pts),
         }
         all_metrics.append(metrics)
 
-        # Save images
         if args.save_images:
             save_image_tensor(generated_img, os.path.join(img_dir, f"{sample_id}_gen.png"))
             save_image_tensor(img_b, os.path.join(img_dir, f"{sample_id}_target.png"))
@@ -250,10 +281,10 @@ def main():
     print("EVALUATION REPORT")
     print("=" * 60)
 
-    # Compute aggregated stats
     agg = {}
     numeric_keys = ["orientation_rmse_deg", "minutiae_precision", "minutiae_recall",
-                     "minutiae_f1", "mse", "psnr_db", "orientation_cosine_sim"]
+                     "minutiae_f1", "mse", "psnr_db", "orientation_cosine_sim",
+                     "identity_cosine_sim_gen_vs_source", "identity_cosine_sim_target_vs_source"]
     for key in numeric_keys:
         values = [m[key] for m in all_metrics]
         agg[key] = {
@@ -273,15 +304,15 @@ def main():
         "per_sample_metrics": all_metrics,
     }
 
-    # Print summary
     print(f"  Samples evaluated: {num_samples}")
     print(f"  Time: {elapsed:.1f}s ({elapsed*1000/max(num_samples,1):.0f}ms/sample)")
     print(f"  Orientation RMSE: {agg['orientation_rmse_deg']['mean']:.2f} +/- {agg['orientation_rmse_deg']['std']:.2f} deg")
     print(f"  Minutiae F1:      {agg['minutiae_f1']['mean']:.4f} +/- {agg['minutiae_f1']['std']:.4f}")
     print(f"  PSNR:             {agg['psnr_db']['mean']:.2f} +/- {agg['psnr_db']['std']:.2f} dB")
     print(f"  Orient Cosine:    {agg['orientation_cosine_sim']['mean']:.4f} +/- {agg['orientation_cosine_sim']['std']:.4f}")
+    print(f"  DMD Identity (gen vs source):    {agg['identity_cosine_sim_gen_vs_source']['mean']:.4f} +/- {agg['identity_cosine_sim_gen_vs_source']['std']:.4f}")
+    print(f"  DMD Identity (target vs source, reference ceiling): {agg['identity_cosine_sim_target_vs_source']['mean']:.4f} +/- {agg['identity_cosine_sim_target_vs_source']['std']:.4f}")
 
-    # Save report
     report_path = os.path.join(output_dir, "eval_results.json")
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)

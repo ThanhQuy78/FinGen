@@ -1,0 +1,36 @@
+{
+  "test": {
+    "EER": 12.834000000000001,
+    "TAR@FAR=1%": 74.292,
+    "TAR@FAR=0.1%": 56.44,
+    "TAR@FAR=0.01%": 20.304,
+    "rank1": 82.67254038179148
+  },
+  "best_val_eer": 12.65,
+  "num_train_classes": 1600,
+  "args": {
+    "train_dir": "data/sd302a_811/train",
+    "val_dir": "data/sd302a_811/val",
+    "test_dir": "data/sd302a_811/test",
+    "embedding_dim": 512,
+    "no_pretrained": false,
+    "arcface_s": 30.0,
+    "arcface_m": 0.5,
+    "image_size": 224,
+    "epochs": 60,
+    "batch_size": 32,
+    "lr": 0.0005,
+    "weight_decay": 0.0005,
+    "warmup_epochs": 5,
+    "margin_warmup_epochs": 10,
+    "num_workers": 4,
+    "seed": 42,
+    "no_amp": false,
+    "checkpoint_dir": "checkpoints",
+    "resume": null,
+    "save_every": 5,
+    "use_wandb": false,
+    "wandb_project": "fingerprint-arcface",
+    "wandb_name": null
+  }
+}

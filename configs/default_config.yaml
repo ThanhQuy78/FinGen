@@ -7,7 +7,7 @@ model:
   patch_size: 2
   in_channels: 4          # VAE latent channels
   out_channels: 4
-  latent_size: 32         # 32x32 latent for 256x256 image
+  latent_size: 64         # 64x64 latent for 256x256 image (VAE v5: 4x downsample, was 32/8x)
   num_sensor_classes: 8   # NIST SD302a sensors A-H
   rope_dim: 64            # 2D-RoPE dimension per head
   rope_offset_delta: 100  # Offset delta for unaligned Stream Y position IDs
@@ -45,13 +45,15 @@ dataset:
   contact_only: true
   # Directory holding the A..H device folders of NIST SD302a
   # ({DEVICE}/{IMPRESSION}/png/{SUBJECT}_{DEVICE}_{IMPRESSION}_{FRGP}.png)
-  sd302a_root: "./archive/images/challengers"
+  sd302a_root: "/home/aiserver/works/fingerprint/dataset/nist302a/images/challengers"
   sd302a_impressions: ["roll"]   # null / [] = every impression type present
+  exclude_sensors: ["H"]         # H is pre-binarized -> CoarseNet over-detects minutiae
+                                  # (~410/img vs 40-150 expected), poisons S_aligned; see README §3
   directed_pairs: true           # emit both A->B and B->A for each sensor pair
   max_pairs_per_finger: 0        # 0 = all C(n,2) (x2 if directed); set e.g. 6 to subsample
   val_fraction: 0.1              # split is by SUBJECT id, never by sample
   split_seed: 42
-  require_cache: false           # true = fail instead of using random S_aligned
+  require_cache: true            # true = fail instead of using random S_aligned
   fvc_roots: []
   multisensor_root: ""
   sd14_root: ""
@@ -82,6 +84,8 @@ losses:
   l_orient_weight: 0.05
   warmup_epochs: 5
   timestep_decay: true
+  identity_embedder: "dmd"              # "dmd" (recommended) | "afrnet" (random-init unless checkpoint trained)
+  identity_checkpoint: "./weights/dmd.pt"  # DMD.tar (NIST SD14, epoch 126) -- see src/losses/dmd/NOTICE.md
 
 eval:
   checkpoint: "./outputs/training/best.pt"

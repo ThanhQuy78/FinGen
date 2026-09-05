@@ -1,0 +1,96 @@
+# Configuration for the UNet + ControlNet + Flow-Matching alternative backbone
+# (src/models/unet_controlnet.py). Everything outside `unet_model:` is copied
+# verbatim from default_config.yaml — data pipeline, VAE, losses, and training
+# schedule are backbone-agnostic (see project discussion), only the model
+# section differs from the MM-DiT config.
+
+unet_model:
+  base_channels: 128
+  channel_mult: [1, 2, 4]     # latent 64x64 -> 64 -> 32 -> 16
+  num_res_blocks: 2
+  attn_resolutions: [16]      # self-attention only at the 16x16 bottleneck level
+  num_heads: 8
+  control_levels: 2           # ControlNet mirrors the first 2 down-resolution levels (64x64, 32x32)
+  in_channels: 4               # VAE latent channels
+  out_channels: 4
+  struct_channels: 6           # S_aligned channel count
+  latent_size: 64              # 64x64 latent for 256x256 image (VAE v5: 4x downsample)
+  num_sensor_classes: 8        # NIST SD302a sensors A-H
+
+# Lightweight config for CPU/small GPU smoke tests (--small flag)
+# unet_model:
+#   base_channels: 32
+#   channel_mult: [1, 2]
+#   num_res_blocks: 1
+#   attn_resolutions: []
+#   num_heads: 4
+#   control_levels: 1
+#   in_channels: 4
+#   out_channels: 4
+#   struct_channels: 6
+#   latent_size: 64
+#   num_sensor_classes: 8
+
+vae:
+  weights: "./weights/vae_fingerprint.pt"
+  latent_channels: 4
+  base_channels: 64
+  freeze: true
+
+preprocessing:
+  coarsenet_weights: "./weights/coarsenet_pytorch.pt"
+  coarsenet_keras_h5: "./CoarseNet.h5"
+  freeze_extractor: true
+  max_canvas: 768
+
+dataset:
+  image_size: 256
+  contact_only: true
+  sd302a_root: "/home/aiserver/works/fingerprint/dataset/nist302a/images/challengers"
+  sd302a_impressions: ["roll"]
+  exclude_sensors: ["H"]
+  directed_pairs: true
+  max_pairs_per_finger: 0
+  val_fraction: 0.1
+  split_seed: 42
+  require_cache: true
+  fvc_roots: []
+  multisensor_root: ""
+  sd14_root: ""
+  sd4_root: ""
+  printsgan_root: ""
+  cached_prep_dir: "./data/cached_stage1"
+  num_workers: 4
+
+training:
+  batch_size: 8
+  learning_rate: 1.0e-4
+  epochs: 50
+  objective: "rectified_flow"
+  use_direct_bridge: false
+  nfe_steps: 20
+  grad_clip_max_norm: 1.0
+  ema_decay: 0.9999
+  warmup_steps: 1000
+  save_every_epochs: 5
+  val_every_epochs: 1
+  log_every_steps: 50
+  output_dir: "./outputs/training_unet_controlnet"
+  amp: true
+
+losses:
+  l_diff_weight: 1.0
+  l_identity_weight: 0.1
+  l_orient_weight: 0.05
+  warmup_epochs: 5
+  timestep_decay: true
+  identity_embedder: "dmd"
+  identity_checkpoint: "./weights/dmd.pt"
+
+eval:
+  checkpoint: "./outputs/training_unet_controlnet/best.pt"
+  output_dir: "./outputs/eval_unet_controlnet"
+  matcher_backend: "bozorth3"
+  num_eval_samples: -1
+  save_images: true
+  nfe_steps: 20

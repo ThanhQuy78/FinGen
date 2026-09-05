@@ -2,7 +2,13 @@
 
 > [!NOTE]
 > **Cập nhật 2026-08-18.** Cả 3 vấn đề critical đã được xử lý. Pipeline chạy thông từ
-> `archive/` đến checkpoint MM-DiT. Hướng dẫn chạy đầy đủ: [RUNBOOK.md](RUNBOOK.md).
+> `archive/` đến checkpoint MM-DiT. Hướng dẫn chạy đầy đủ: RUNBOOK.md (không có trong
+> checkout hiện tại — xem cập nhật 2026-08-22 bên dưới).
+
+> [!NOTE]
+> **Cập nhật 2026-08-22 — máy mới (`aiserver`), repo là bản "upload" đã squash.**
+> Repo hiện tại chỉ có 2 commit (`Create README.md`, `upload`) — mọi lịch sử/artefact cục
+> bộ của lần phân tích trước đã bị gộp mất, kể cả `RUNBOOK.md`. Xem chi tiết ở cuối file.
 
 ## Kết luận
 
@@ -152,3 +158,79 @@ matching giữa sensor A và B.
 | `pytest tests/` | 10 passed |
 
 Số liệu chất lượng chưa có ý nghĩa — model mới train vài step trên CPU.
+
+---
+
+## 🔄 Cập nhật 2026-08-22 — máy `aiserver`, dataset đầy đủ tại đường dẫn mới
+
+### Bối cảnh
+
+Repo hiện tại (`git log`) chỉ có 2 commit: `Create README.md` rồi `upload` — một commit
+duy nhất chứa toàn bộ 94 file, kể cả `__pycache__` và `outputs/`. Đây là bản **squash/export**
+từ máy làm việc trước, nên mọi thứ *không track bằng git* (do `.gitignore` chặn `*.pt`, `*.pth`,
+`outputs/` — dù `outputs/` vẫn lọt vào vì đã add trước khi ignore) đã **không** đi theo:
+
+| Thiếu trên máy này | Được nhắc tới trong phân tích 08-18 |
+|---|---|
+| `RUNBOOK.md` | "Hướng dẫn chạy đầy đủ" |
+| `archive/` (symlink/thư mục dataset cũ) | `sd302a_root` mặc định trỏ vào đây |
+| `weights/vae_fingerprint.pt`, `weights/coarsenet_pytorch.pt` | output của `train_vae.py`, `convert_minutiaenet_weights.py` |
+| `CoarseNet.h5` gốc (Keras) | input của bước convert |
+
+`data/cached_stage1/` chỉ còn **8 file** (1 subject `00002303`, sensor A, 8 impression) — Stage 1
+thực tế coi như chưa chạy trên máy này. `outputs/training/train_log.csv` (2 step) và
+`outputs/eval/eval_results.json` (2 sample, minutiae precision/recall = 0, orientation RMSE
+44°) vẫn là smoke-test cũ từ CPU, **không phản ánh chất lượng model**.
+
+### ✅ Dataset tại `/home/aiserver/works/fingerprint/dataset/nist302a` — khớp hoàn toàn
+
+Cấu trúc trên đĩa đúng layout SD302a chuẩn (`images/challengers/{A..H}/roll/png/...`), 2.0 GB:
+
+| Sensor | A | B | C | D | E | F | G | H | **Tổng** |
+|---|---|---|---|---|---|---|---|---|---|
+| PNG | 1960 | 1956 | 1998 | 1987 | 1887 | 2000 | 700 | 1142 | **13.630** |
+
+Trỏ thẳng `dataset.sd302a_root` vào đường dẫn này (không cần `archive/`) và chạy lại
+`src/data/dataset.py` cho kết quả **giống hệt** báo cáo 08-18:
+
+```
+train:  72246 pairs | 181 subjects | 12286 unique source images
+val  :   8276 pairs |  19 subjects |  1344 unique source images
+```
+
+→ `SD302aInspector`/`CrossSensorFingerprintDataset` hoạt động đúng với bản dataset này, không
+cần sửa code — chỉ cần cập nhật `configs/default_config.yaml: dataset.sd302a_root`.
+
+### 🖥️ Compute — vấn đề "🔴 Critical #1" của bản 08-18 giờ đã có lời giải
+
+Máy này có **2× NVIDIA RTX A4000 16 GB** (driver 550.54, CUDA 12.4) và
+`torch==2.1.0+cu121` với `torch.cuda.is_available() == True` — khác hẳn máy cũ
+(GTX 1650 4 GB, torch CPU-only). Ước tính cũ "1–2 giờ trên GPU" cho 13.630 ảnh giờ khả thi.
+
+### 🔎 Phát hiện thêm: có sẵn artefact thay thế trên cùng máy (ngoài repo)
+
+Tìm trên filesystem thấy các file có khả năng vá 2 lỗ hổng còn lại, **nhưng nằm ngoài
+project này** (thư mục làm việc khác của `binhan`/`pad`) — cần xin phép trước khi copy/dùng:
+
+| File | Kích thước | Ghi chú |
+|---|---|---|
+| `~/workspace/binhan/fingerprint/recognition/MinutiaeNet/Models/CoarseNet.h5` | 81.112.872 bytes | **Khớp chính xác** với "81 MB, round-trip diff 0" đã verify trong báo cáo 08-18 → gần như chắc chắn là cùng 1 file gốc |
+| `~/workspace/binhan/fingerprint/recognition/AFR-Net/ckpt/best.pt` / `best.pth` | 558 MB / 718 MB | Checkpoint AFR-Net đã train (dict `{model, optim}`) — ứng viên cho `L_Identity`, nhưng **chưa kiểm tra khớp kiến trúc** với `AFRNetEmbeddingExtractor` trong `src/losses/identity_loss.py` |
+| `~/workspace/pad/finger_gen/model_bench/weights/afrnet.pth` | 190 MB | Một checkpoint AFRNet khác, cũng cần kiểm tra tương thích |
+
+Việc "🟠 High #2 — AFRNet thiếu pretrained weights" ở báo cáo 08-18 do đó **có thể không còn
+là vấn đề thiếu weights, mà là vấn đề adapt kiến trúc** — cần đối chiếu `AFRNetEmbeddingExtractor`
+với `afrnet/model.py` trong repo AFR-Net để viết converter, tương tự cách đã làm với CoarseNet.
+
+### 📋 Việc tiếp theo (cập nhật độ ưu tiên)
+
+| # | Task | Trạng thái |
+|---|---|---|
+| 1 | Sửa `configs/default_config.yaml: dataset.sd302a_root` → `/home/aiserver/works/fingerprint/dataset/nist302a/images/challengers` | 🔴 Chưa làm, 1 dòng config |
+| 2 | Lấy lại `CoarseNet.h5` (copy từ `MinutiaeNet/Models/` nếu được phép) + chạy `scripts/convert_minutiaenet_weights.py` để có `weights/coarsenet_pytorch.pt` | 🔴 Blocker cho Stage 1 |
+| 3 | Chạy `scripts/run_offline_preprocessing.py` full 13.630 ảnh trên GPU A4000 | 🔴 Critical, giờ khả thi (~1–2h) |
+| 4 | Bật `dataset.require_cache: true` sau khi cache xong | 🔴 Critical |
+| 5 | Train VAE rồi MM-DiT thật trên GPU (không phải smoke test) | 🔴 Critical |
+| 6 | Đối chiếu `AFR-Net/ckpt/best.pt` với `AFRNetEmbeddingExtractor`, viết converter nếu khớp | 🟠 High |
+| 7 | Minutiae matching giữa 2 sensor để TPS `is_aligned` thực sự `True` | 🟡 Medium |
+| 8 | Tái tạo/khôi phục `RUNBOOK.md` (bị mất trong lần upload này) | 🟢 Low |

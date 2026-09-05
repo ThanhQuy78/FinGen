@@ -12,36 +12,43 @@ def compute_gradient_orientation(img: torch.Tensor, block_size: int = 16) -> tor
     Input: img tensor of shape (B, 1, H, W) normalized to [0, 1]
     Output: orientation map tensor of shape (B, 2, H // block_size, W // block_size)
             containing continuous (cos(2θ), sin(2θ)).
+
+    Runs in fp32 regardless of an enclosing torch.amp.autocast context: the squared
+    gradient terms (Gxx, Gyy, Gxy) can overflow fp16's ~65504 range when called on
+    unclamped VAE-decoded pixels (as opposed to the [0, 1] images this was validated
+    against), producing inf and then inf/inf = nan in the normalization below.
     """
-    B, C, H, W = img.shape
-    
-    # Sobel kernels for Gradients
-    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=img.dtype, device=img.device).view(1, 1, 3, 3)
-    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=img.dtype, device=img.device).view(1, 1, 3, 3)
-    
-    Gx = F.conv2d(img, sobel_x, padding=1)
-    Gy = F.conv2d(img, sobel_y, padding=1)
-    
-    # Gradient covariance components
-    Gxx = Gx * Gx
-    Gyy = Gy * Gy
-    Gxy = Gx * Gy
-    
-    # Average over local blocks using average pooling
-    avg_pool = nn.AvgPool2d(kernel_size=block_size, stride=block_size)
-    
-    V_x = 2.0 * avg_pool(Gxy)
-    V_y = avg_pool(Gxx - Gyy)
-    
-    # Orientation angle theta = 0.5 * atan2(V_x, V_y) + pi/2
-    # cos(2θ) = -V_y / sqrt(V_x^2 + V_y^2)
-    # sin(2θ) = V_x / sqrt(V_x^2 + V_y^2)
-    
-    norm = torch.sqrt(V_x * V_x + V_y * V_y + 1e-8)
-    cos2theta = -V_y / norm
-    sin2theta = V_x / norm
-    
-    orientation_map = torch.cat([cos2theta, sin2theta], dim=1) # (B, 2, h_block, w_block)
+    with torch.autocast(device_type=img.device.type, enabled=False):
+        img = img.float()
+        B, C, H, W = img.shape
+
+        # Sobel kernels for Gradients
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=img.dtype, device=img.device).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=img.dtype, device=img.device).view(1, 1, 3, 3)
+
+        Gx = F.conv2d(img, sobel_x, padding=1)
+        Gy = F.conv2d(img, sobel_y, padding=1)
+
+        # Gradient covariance components
+        Gxx = Gx * Gx
+        Gyy = Gy * Gy
+        Gxy = Gx * Gy
+
+        # Average over local blocks using average pooling
+        avg_pool = nn.AvgPool2d(kernel_size=block_size, stride=block_size)
+
+        V_x = 2.0 * avg_pool(Gxy)
+        V_y = avg_pool(Gxx - Gyy)
+
+        # Orientation angle theta = 0.5 * atan2(V_x, V_y) + pi/2
+        # cos(2θ) = -V_y / sqrt(V_x^2 + V_y^2)
+        # sin(2θ) = V_x / sqrt(V_x^2 + V_y^2)
+
+        norm = torch.sqrt(V_x * V_x + V_y * V_y + 1e-8)
+        cos2theta = -V_y / norm
+        sin2theta = V_x / norm
+
+        orientation_map = torch.cat([cos2theta, sin2theta], dim=1) # (B, 2, h_block, w_block)
     return orientation_map
 
 
@@ -65,12 +72,14 @@ def compute_orientation_coherence(orient1: torch.Tensor, orient2: torch.Tensor) 
     Input: orient1, orient2 of shape (B, 2, H, W)
     Output: scalar loss or map of per-pixel orientation error.
     """
-    # Normalize vectors
-    o1_norm = F.normalize(orient1, p=2, dim=1, eps=1e-8)
-    o2_norm = F.normalize(orient2, p=2, dim=1, eps=1e-8)
-    
-    # Cosine similarity in (cos2θ, sin2θ) space
-    cos_sim = torch.sum(o1_norm * o2_norm, dim=1, keepdim=True)
-    # Coherence loss: 1 - cosine similarity
-    loss = 1.0 - cos_sim
+    with torch.autocast(device_type=orient1.device.type, enabled=False):
+        orient1, orient2 = orient1.float(), orient2.float()
+        # Normalize vectors
+        o1_norm = F.normalize(orient1, p=2, dim=1, eps=1e-8)
+        o2_norm = F.normalize(orient2, p=2, dim=1, eps=1e-8)
+
+        # Cosine similarity in (cos2θ, sin2θ) space
+        cos_sim = torch.sum(o1_norm * o2_norm, dim=1, keepdim=True)
+        # Coherence loss: 1 - cosine similarity
+        loss = 1.0 - cos_sim
     return loss.mean()

@@ -22,7 +22,9 @@ class Stage4CompositeLossBuilder(nn.Module):
         l_identity_weight: float = 0.1,
         l_orient_weight: float = 0.05,
         warmup_epochs: int = 5,
-        timestep_decay: bool = True
+        timestep_decay: bool = True,
+        identity_embedder: str = "dmd",
+        identity_checkpoint: str = "./weights/dmd.pt",
     ):
         super().__init__()
         self.w_diff = l_diff_weight
@@ -31,7 +33,10 @@ class Stage4CompositeLossBuilder(nn.Module):
         self.warmup_epochs = warmup_epochs
         self.timestep_decay = timestep_decay
 
-        self.identity_loss_fn = IdentityCosineLoss()
+        self.identity_loss_fn = IdentityCosineLoss(
+            embedder_type=identity_embedder,
+            checkpoint_path=identity_checkpoint or None,
+        )
         self.orient_loss_fn = OrientationCoherenceLoss()
 
     def _get_epoch_warmup_factor(self, epoch: int) -> float:
@@ -45,13 +50,24 @@ class Stage4CompositeLossBuilder(nn.Module):
 
     def _get_timestep_weight_scale(self, t: torch.Tensor) -> torch.Tensor:
         """
-        Returns timestep weight multiplier (1 - t) in [0, 1].
-        At t near 1.0 (heavy noise), weight is near 0.
-        At t near 0.0 (clean image), weight is near 1.
+        Returns timestep weight multiplier t in [0, 1].
+
+        This codebase's rectified-flow trajectory (flow_matching.py's
+        sample_trajectory) runs t=0 (noise, x_0) -> t=1 (clean target, x_1) --
+        the OPPOSITE of the standard DDPM convention this function used to
+        assume. x1_est = x_t + (1-t)*v_pred (compute_x0_estimate), so a fixed
+        model error in v_pred is scaled by (1-t): the x1-estimate is least
+        reliable near t=0 and most reliable near t=1. Empirically (see
+        verify_timestep_weight_direction.py), DMD identity cosine similarity
+        of x1_est against the real target rises from ~0.46 at t=0.1 to ~0.77
+        at t=0.9. So identity/orientation loss should be weighted UP as t -> 1
+        (reliable estimate, worth pulling toward), not down -- the previous
+        `1 - t` here did the opposite: near-max weight on the noisiest,
+        least-identity-preserving estimates, near-zero weight on the best ones.
         """
         if not self.timestep_decay:
             return torch.ones_like(t)
-        return torch.clamp(1.0 - t, min=0.0, max=1.0)
+        return torch.clamp(t, min=0.0, max=1.0)
 
     def forward(
         self,

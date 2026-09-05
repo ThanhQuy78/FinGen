@@ -1,0 +1,102 @@
+# Tier-1 rebalancing experiment -- copy of unet_controlnet_config.yaml with
+# two dataset knobs added (see src/data/dataset.py's CrossSensorFingerprintDataset
+# __init__ / _index_sd302a):
+#   - min_pairs_per_finger: 30   floors sparse-coverage fingers' pair count by
+#     deterministic duplication (was 12-42 depending on real-sensor count,
+#     scaling ~quadratically -- sparse fingers were proportionally
+#     under-represented every epoch, exactly the regime inference needs to
+#     extrapolate from). 30 matches the dataset's dominant tier (1254/2000
+#     fingers already sit at 30) without aggressively over-duplicating the
+#     handful of very-sparse fingers.
+#   - sensor_b_oversample: {G: 2.5}   sensor G has ~4,100 real target pairs
+#     dataset-wide vs ~10,000-10,500 for every other sensor (H is already
+#     excluded) -- 2.5x roughly equalizes G's per-epoch frequency with the rest.
+# Verified via scripts/verify_tier1_rebalancing.py: sensor_B distribution goes
+# from {G: 4099, others: 10026-10487} to {G: 10331, others: 10108-10772};
+# pairs/finger floor goes from 12 to 30. Kept as a separate file (rather than
+# editing unet_controlnet_config.yaml in place) so generation/eval scripts
+# that load the base config are unaffected.
+#
+# Used for: fine-tuning outputs/training_unet_controlnet_tstepfix/latest.pt
+# (the timestep-weight-fix checkpoint) further with this rebalanced sampling,
+# on top of -- not instead of -- that already-validated fix.
+
+unet_model:
+  base_channels: 128
+  channel_mult: [1, 2, 4]
+  num_res_blocks: 2
+  attn_resolutions: [16]
+  num_heads: 8
+  control_levels: 2
+  in_channels: 4
+  out_channels: 4
+  struct_channels: 6
+  latent_size: 64
+  num_sensor_classes: 8
+
+vae:
+  weights: "./weights/vae_fingerprint.pt"
+  latent_channels: 4
+  base_channels: 64
+  freeze: true
+
+preprocessing:
+  coarsenet_weights: "./weights/coarsenet_pytorch.pt"
+  coarsenet_keras_h5: "./CoarseNet.h5"
+  freeze_extractor: true
+  max_canvas: 768
+
+dataset:
+  image_size: 256
+  contact_only: true
+  sd302a_root: "/home/aiserver/works/fingerprint/dataset/nist302a/images/challengers"
+  sd302a_impressions: ["roll"]
+  exclude_sensors: ["H"]
+  directed_pairs: true
+  max_pairs_per_finger: 0
+  min_pairs_per_finger: 30       # Tier-1: new
+  sensor_b_oversample:            # Tier-1: new
+    G: 2.5
+  val_fraction: 0.1
+  split_seed: 42
+  require_cache: true
+  fvc_roots: []
+  multisensor_root: ""
+  sd14_root: ""
+  sd4_root: ""
+  printsgan_root: ""
+  cached_prep_dir: "./data/cached_stage1"
+  num_workers: 4
+
+training:
+  batch_size: 8
+  learning_rate: 1.0e-4
+  epochs: 50
+  objective: "rectified_flow"
+  use_direct_bridge: false
+  nfe_steps: 20
+  grad_clip_max_norm: 1.0
+  ema_decay: 0.9999
+  warmup_steps: 1000
+  save_every_epochs: 5
+  val_every_epochs: 1
+  log_every_steps: 50
+  output_dir: "./outputs/training_unet_controlnet_tier1"
+  amp: true
+
+losses:
+  l_diff_weight: 1.0
+  l_identity_weight: 0.1
+  l_orient_weight: 0.05
+  warmup_epochs: 5
+  timestep_decay: true
+  identity_embedder: "dmd"
+  identity_checkpoint: "./weights/dmd.pt"
+
+eval:
+  checkpoint: "./outputs/training_unet_controlnet_tier1/best.pt"
+  output_dir: "./outputs/eval_unet_controlnet_tier1"
+  matcher_backend: "bozorth3"
+  num_eval_samples: -1
+  save_images: true
+  nfe_steps: 20
